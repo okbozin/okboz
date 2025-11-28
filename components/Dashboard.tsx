@@ -5,22 +5,8 @@ import { Employee, EmployeeStatus, Department, Transaction, ListItem, CompanySet
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { GoogleGenAI } from "@google/genai";
 import { db, isConfigured } from '../firebase';
-import { 
-  collection, 
-  addDoc, 
-  onSnapshot, 
-  updateDoc, 
-  doc, 
-  deleteDoc, 
-  query, 
-  orderBy,
-  serverTimestamp,
-  getDoc,
-  getFirestore,
-  setDoc,
-  where
-} from 'firebase/firestore';
-import { initializeApp, deleteApp } from 'firebase/app';
+import firebase from 'firebase/compat/app';
+import 'firebase/compat/firestore';
 
 // --- Sub-Components ---
 
@@ -38,8 +24,8 @@ const SimpleListManager: React.FC<{
 
   useEffect(() => {
     if (isConfigured) {
-      const q = query(collection(db, collectionName), orderBy('name'));
-      const unsub = onSnapshot(q, (snap) => {
+      const q = db.collection(collectionName).orderBy('name');
+      const unsub = q.onSnapshot((snap) => {
         setItems(snap.docs.map(d => ({ id: d.id, name: d.data().name })));
       });
       return () => unsub();
@@ -47,11 +33,17 @@ const SimpleListManager: React.FC<{
       const stored = localStorage.getItem(storageKey);
       if (stored) {
         // Handle legacy string array or new object array
-        const parsed = JSON.parse(stored);
-        if (parsed.length > 0 && typeof parsed[0] === 'string') {
-           setItems(parsed.map((s: string) => ({ id: s, name: s })));
-        } else {
-           setItems(parsed);
+        try {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed)) {
+            if (parsed.length > 0 && typeof parsed[0] === 'string') {
+               setItems(parsed.map((s: string) => ({ id: s, name: s })));
+            } else {
+               setItems(parsed);
+            }
+          }
+        } catch (e) {
+          console.error("Error parsing list", e);
         }
       }
     }
@@ -60,7 +52,7 @@ const SimpleListManager: React.FC<{
   const handleAdd = async () => {
     if (!newItem.trim()) return;
     if (isConfigured) {
-      await addDoc(collection(db, collectionName), { name: newItem.trim() });
+      await db.collection(collectionName).add({ name: newItem.trim() });
     } else {
       const newEntry = { id: Date.now().toString(), name: newItem.trim() };
       const updated = [...items, newEntry];
@@ -73,7 +65,7 @@ const SimpleListManager: React.FC<{
   const handleDelete = async (itemId: string) => {
      if(isConfigured) {
         try {
-           await deleteDoc(doc(db, collectionName, itemId));
+           await db.collection(collectionName).doc(itemId).delete();
         } catch (e) {
            console.error("Error deleting doc", e);
            alert("Error deleting item. Check console.");
@@ -148,8 +140,8 @@ const EmployeeSettingsSection: React.FC = () => {
   // Load Settings
   useEffect(() => {
      if (isConfigured) {
-        const unsub = onSnapshot(doc(db, 'settings', SETTINGS_DOC_ID), (doc) => {
-           if (doc.exists()) {
+        const unsub = db.collection('settings').doc(SETTINGS_DOC_ID).onSnapshot((doc) => {
+           if (doc.exists) {
               setSettings(doc.data() as CompanySettings);
            }
         });
@@ -166,7 +158,7 @@ const EmployeeSettingsSection: React.FC = () => {
      setSettings(newSettings);
      
      if (isConfigured) {
-        await setDoc(doc(db, 'settings', SETTINGS_DOC_ID), newSettings, { merge: true });
+        await db.collection('settings').doc(SETTINGS_DOC_ID).set(newSettings, { merge: true });
      } else {
         localStorage.setItem('jk_company_settings', JSON.stringify(newSettings));
      }
@@ -287,8 +279,8 @@ const EmployeeSettingsSection: React.FC = () => {
 
       useEffect(() => {
          if(isConfigured) {
-             const q = query(collection(db, 'employees'), where('status', '==', 'Inactive'));
-             const unsub = onSnapshot(q, (snap) => {
+             const q = db.collection('employees').where('status', '==', 'Inactive');
+             const unsub = q.onSnapshot((snap) => {
                  setInactiveList(snap.docs.map(d => ({id: d.id, ...d.data()} as Employee)));
              });
              return () => unsub();
@@ -649,7 +641,6 @@ const EmployeeSettingsSection: React.FC = () => {
          <div className="max-w-4xl mx-auto">
             <div className="mb-6 flex items-center gap-3 pb-4 border-b border-gray-100">
                <div className="p-2 bg-gray-100 rounded-lg text-brand-600">
-                 {/* Correctly render the icon as a JSX element if it exists */}
                  {activeItem && <activeItem.icon className="w-6 h-6" />}
                </div>
                <h2 className="text-2xl font-bold text-gray-800">
@@ -679,18 +670,25 @@ const SiteSettingsSection: React.FC = () => {
 
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [statusMessage, setStatusMessage] = useState('');
+  const [isSeeding, setIsSeeding] = useState(false);
+  const [showJsonModal, setShowJsonModal] = useState(false);
+  const [jsonInput, setJsonInput] = useState('');
 
   useEffect(() => {
     // Load Firebase Config
     const saved = localStorage.getItem('jk_buddy_firebase_config');
     if (saved) {
-      setConfig(JSON.parse(saved));
+      try {
+        setConfig(JSON.parse(saved));
+      } catch(e) { console.error("Bad config in localstorage"); }
     }
 
     // Load Maps Config
     const savedMaps = localStorage.getItem('jk_buddy_maps_config');
     if (savedMaps) {
-      setMapsConfig(JSON.parse(savedMaps));
+      try {
+         setMapsConfig(JSON.parse(savedMaps));
+      } catch(e) { console.error("Bad map config"); }
     }
   }, []);
 
@@ -704,6 +702,15 @@ const SiteSettingsSection: React.FC = () => {
   };
 
   const handleSave = () => {
+    if (!config.apiKey || !config.projectId) {
+       alert("Please enter at least API Key and Project ID.");
+       return;
+    }
+    // Prevent saving default placeholder as valid config
+    if (config.apiKey === 'YOUR_API_KEY') {
+       alert("You cannot save the default placeholder API Key. Please enter your real Firebase credentials.");
+       return;
+    }
     localStorage.setItem('jk_buddy_firebase_config', JSON.stringify(config));
     window.location.reload();
   };
@@ -721,17 +728,65 @@ const SiteSettingsSection: React.FC = () => {
     }
   };
 
+  const parseJsonConfig = () => {
+    try {
+        // Remove 'const firebaseConfig = ' and any trailing semicolons or whitespace
+        let cleaned = jsonInput
+            .replace(/const\s+firebaseConfig\s*=\s*/, '')
+            .replace(/;$/, '')
+            .trim();
+        
+        // If user pasted a relaxed JSON (JS object), we might need to quote keys
+        // Simple heuristic: try to parse directly, if fail, try to quote keys
+        // But JSON.parse is strict. 
+        // Let's assume standard JSON first.
+        
+        // Note: The Firebase console gives a JS object, not valid JSON (keys aren't quoted).
+        // e.g. { apiKey: "..." }
+        // We need to convert this to valid JSON.
+        
+        // Regex to quote keys
+        cleaned = cleaned.replace(/(\w+):/g, '"$1":');
+        // Regex to replace single quotes with double quotes
+        cleaned = cleaned.replace(/'/g, '"');
+        
+        // Remove trailing commas
+        cleaned = cleaned.replace(/,\s*}/g, '}');
+
+        const parsed = JSON.parse(cleaned);
+        
+        if (parsed.apiKey && parsed.projectId) {
+            setConfig({
+                apiKey: parsed.apiKey,
+                authDomain: parsed.authDomain || '',
+                projectId: parsed.projectId,
+                storageBucket: parsed.storageBucket || '',
+                messagingSenderId: parsed.messagingSenderId || '',
+                appId: parsed.appId || ''
+            });
+            setShowJsonModal(false);
+            setTestStatus('idle');
+            setStatusMessage('Config parsed! Click "Sync & Restart" to apply.');
+        } else {
+            alert("Could not find apiKey or projectId in the pasted text.");
+        }
+    } catch (e) {
+        console.error(e);
+        alert("Failed to parse. Please ensure you pasted the full code block from Firebase.");
+    }
+  };
+
   const handleTestConnection = async () => {
     setTestStatus('testing');
     setStatusMessage('Attempting to connect to Firebase...');
     
     try {
-      const tempApp = initializeApp(config, 'testApp');
-      const tempDb = getFirestore(tempApp);
+      const tempApp = firebase.initializeApp(config, 'testApp');
+      const tempDb = tempApp.firestore();
       
       // Try to read a non-existent doc just to check connection
       try {
-        await getDoc(doc(tempDb, 'test_collection', 'test_doc'));
+        await tempDb.collection('test_collection').doc('test_doc').get();
         // If we get here (even if doc doesn't exist), connection worked enough to check
         setTestStatus('success');
         setStatusMessage('Connection Successful! Configuration is valid.');
@@ -745,12 +800,68 @@ const SiteSettingsSection: React.FC = () => {
         }
       }
       
-      await deleteApp(tempApp);
+      await tempApp.delete();
     } catch (error: any) {
       console.error(error);
       setTestStatus('error');
       setStatusMessage(`Connection Failed: ${error.message}`);
     }
+  };
+
+  const handleSeedDatabase = async () => {
+      if (!isConfigured) {
+          alert("Please configure and sync Firebase keys first before initializing the database.");
+          return;
+      }
+      if (!window.confirm("This will populate your database with default roles, departments, and settings. Continue?")) return;
+      
+      setIsSeeding(true);
+      try {
+          const batch = db.batch();
+          
+          // 1. Global Settings
+          const settingsRef = db.collection('settings').doc('globalConfig');
+          batch.set(settingsRef, {
+              attendanceMode: 'face',
+              salaryMonthType: 'calendar',
+              includeWeekoffs: true,
+              includeHolidays: true,
+              autoLiveTrack: false,
+              attendanceCycle: '1-end',
+              salaryRoundOff: 'none',
+              notifications: { appPunch: true, emailReport: false, whatsappAlert: false }
+          });
+
+          // 2. Default Departments
+          const deptNames = ['Human Resources', 'IT & Development', 'Sales & Marketing', 'Operations', 'Finance'];
+          deptNames.forEach(name => {
+              const ref = db.collection('settings_departments').doc();
+              batch.set(ref, { name });
+          });
+
+          // 3. Default Roles
+          const roleNames = ['Manager', 'Team Lead', 'Senior Developer', 'Sales Executive', 'Accountant', 'Intern'];
+          roleNames.forEach(name => {
+              const ref = db.collection('settings_roles').doc();
+              batch.set(ref, { name });
+          });
+
+          // 4. Default Branches
+          const branchRef = db.collection('settings_branches').doc();
+          batch.set(branchRef, { name: 'Head Office' });
+
+          // 5. Default Shifts
+          const shiftRef = db.collection('settings_shifts').doc();
+          batch.set(shiftRef, { name: 'General Shift (9 AM - 6 PM)' });
+
+          await batch.commit();
+          alert("Success! Your cloud database has been initialized with default data.");
+      } catch (e: any) {
+          console.error(e);
+          alert("Error initializing database: " + e.message + "\nCheck if your account has Write permissions.");
+      } finally {
+          setIsSeeding(false);
+      }
   };
 
   return (
@@ -767,9 +878,17 @@ const SiteSettingsSection: React.FC = () => {
 
        {/* Firebase Config Card */}
        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className="bg-brand-50 px-6 py-4 border-b border-brand-100 flex items-center gap-3">
-             <Icons.Flame className="text-brand-600 w-5 h-5" />
-             <h3 className="font-bold text-brand-900">Firebase Configuration</h3>
+          <div className="bg-brand-50 px-6 py-4 border-b border-brand-100 flex items-center justify-between">
+             <div className="flex items-center gap-3">
+                 <Icons.Flame className="text-brand-600 w-5 h-5" />
+                 <h3 className="font-bold text-brand-900">Firebase Configuration</h3>
+             </div>
+             <button 
+                onClick={() => setShowJsonModal(true)}
+                className="text-xs font-bold text-brand-700 bg-brand-100 hover:bg-brand-200 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1"
+             >
+                <Icons.FileCode className="w-3 h-3" /> Paste Config JSON
+             </button>
           </div>
           
           <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -825,6 +944,35 @@ const SiteSettingsSection: React.FC = () => {
                   <Icons.RefreshCw className="w-4 h-4" /> Sync & Restart
                 </button>
              </div>
+          </div>
+       </div>
+
+       {/* Database Management Card */}
+       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="bg-purple-50 px-6 py-4 border-b border-purple-100 flex items-center gap-3">
+             <Icons.Database className="text-purple-600 w-5 h-5" />
+             <h3 className="font-bold text-purple-900">Database Management</h3>
+          </div>
+          <div className="p-6 flex items-center justify-between">
+              <div>
+                  <h4 className="font-bold text-gray-800">Initialize Cloud Database</h4>
+                  <p className="text-sm text-gray-500 max-w-lg">
+                      Populate your fresh Firestore database with default Departments, Roles, Shifts, and Global Settings. 
+                      Use this only once after connecting a new project.
+                  </p>
+              </div>
+              <button 
+                  onClick={handleSeedDatabase}
+                  disabled={isSeeding || !isConfigured}
+                  className={`flex items-center gap-2 px-6 py-3 rounded-xl font-bold transition-all shadow-md ${
+                      isConfigured 
+                      ? 'bg-purple-600 text-white hover:bg-purple-700 hover:shadow-lg' 
+                      : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                  }`}
+              >
+                  {isSeeding ? <Icons.RefreshCw className="animate-spin w-5 h-5" /> : <Icons.Layers className="w-5 h-5" />}
+                  {isSeeding ? 'Initializing...' : 'Initialize Data'}
+              </button>
           </div>
        </div>
 
@@ -896,8 +1044,158 @@ const SiteSettingsSection: React.FC = () => {
              </p>
           </div>
        </div>
+
+       {/* Paste Config Modal */}
+       {showJsonModal && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+             <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full overflow-hidden">
+                <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                   <h3 className="font-bold text-gray-800">Paste Configuration Code</h3>
+                   <button onClick={() => setShowJsonModal(false)} className="text-gray-400 hover:text-gray-600"><Icons.X className="w-5 h-5" /></button>
+                </div>
+                <div className="p-6">
+                   <p className="text-sm text-gray-500 mb-3">
+                      Copy the code block from Firebase Console (Project Settings {'>'} General {'>'} Your apps) and paste it here.
+                   </p>
+                   <textarea 
+                     className="w-full h-40 p-3 border border-gray-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-brand-500 outline-none"
+                     placeholder={`const firebaseConfig = {\n  apiKey: "AIza...",\n  authDomain: "..."\n};`}
+                     value={jsonInput}
+                     onChange={(e) => setJsonInput(e.target.value)}
+                   ></textarea>
+                   <div className="flex justify-end gap-3 mt-4">
+                      <button onClick={() => setShowJsonModal(false)} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg text-sm">Cancel</button>
+                      <button onClick={parseJsonConfig} className="px-4 py-2 bg-brand-600 text-white rounded-lg hover:bg-brand-700 text-sm font-bold">Parse & Apply</button>
+                   </div>
+                </div>
+             </div>
+          </div>
+       )}
     </div>
   );
+};
+
+const FieldTrackingSection: React.FC<{ employees: Employee[] }> = ({ employees }) => {
+    const [selectedEmpId, setSelectedEmpId] = useState<string | null>(null);
+    const [mapApiKey, setMapApiKey] = useState('');
+
+    useEffect(() => {
+        const stored = localStorage.getItem('jk_buddy_maps_config');
+        if (stored) {
+            try {
+                const parsed = JSON.parse(stored);
+                if (parsed.apiKey && parsed.enableTracking) {
+                    setMapApiKey(parsed.apiKey);
+                }
+            } catch (e) { console.error("Bad map config"); }
+        }
+    }, []);
+
+    // Filter for Active Field Employees
+    const fieldAgents = useMemo(() => 
+        employees.filter(e => e.workMode === 'Field' && e.status === EmployeeStatus.Present),
+    [employees]);
+
+    const selectedEmp = employees.find(e => e.id === selectedEmpId);
+
+    return (
+        <div className="flex h-[calc(100vh-140px)] gap-6">
+            {/* Sidebar List */}
+            <div className="w-80 flex flex-col bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm">
+                <div className="p-4 border-b border-gray-100 bg-gray-50">
+                    <h3 className="font-bold text-gray-800 flex items-center gap-2">
+                        <Icons.MapPin className="w-5 h-5 text-brand-600" /> Field Agents
+                        <span className="bg-brand-100 text-brand-700 text-xs px-2 py-0.5 rounded-full">{fieldAgents.length}</span>
+                    </h3>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                    {fieldAgents.length > 0 ? (
+                        fieldAgents.map(agent => (
+                            <div 
+                                key={agent.id}
+                                onClick={() => setSelectedEmpId(agent.id)}
+                                className={`p-3 rounded-xl border cursor-pointer transition-all ${
+                                    selectedEmpId === agent.id 
+                                    ? 'bg-brand-50 border-brand-300 ring-1 ring-brand-300' 
+                                    : 'bg-white border-gray-100 hover:border-gray-300 hover:shadow-sm'
+                                }`}
+                            >
+                                <div className="flex items-center gap-3">
+                                    <img src={agent.avatar} alt={agent.name} className="w-10 h-10 rounded-full object-cover" />
+                                    <div className="flex-1 min-w-0">
+                                        <h4 className="font-bold text-gray-900 text-sm truncate">{agent.name}</h4>
+                                        <p className="text-xs text-gray-500 truncate">{agent.location || 'Location pending...'}</p>
+                                    </div>
+                                    <div className="text-xs font-bold text-green-600 bg-green-50 px-1.5 py-0.5 rounded">
+                                        Live
+                                    </div>
+                                </div>
+                                <div className="mt-2 flex items-center gap-4 text-xs text-gray-400 px-1">
+                                    <span className="flex items-center gap-1"><Icons.Clock className="w-3 h-3" /> 2m ago</span>
+                                    <span className="flex items-center gap-1"><Icons.Battery className="w-3 h-3" /> 84%</span>
+                                </div>
+                            </div>
+                        ))
+                    ) : (
+                        <div className="text-center py-10 px-4 text-gray-400">
+                            <Icons.MapPin className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                            <p className="text-sm">No field agents currently active.</p>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Map Area */}
+            <div className="flex-1 bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm relative">
+                {mapApiKey ? (
+                    selectedEmp && selectedEmp.location ? (
+                        <iframe
+                            width="100%"
+                            height="100%"
+                            style={{ border: 0 }}
+                            loading="lazy"
+                            allowFullScreen
+                            referrerPolicy="no-referrer-when-downgrade"
+                            src={`https://www.google.com/maps/embed/v1/place?key=${mapApiKey}&q=${encodeURIComponent(selectedEmp.location)}&zoom=14`}>
+                        </iframe>
+                    ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center bg-blue-50/50 text-blue-900/50">
+                            <Icons.Map className="w-20 h-20 mb-4 opacity-20" />
+                            <h3 className="text-xl font-bold opacity-60">Select an agent to view location</h3>
+                            <p className="text-sm opacity-50">Real-time GPS tracking enabled</p>
+                        </div>
+                    )
+                ) : (
+                    <div className="w-full h-full flex flex-col items-center justify-center bg-gray-50 text-center p-8">
+                        <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mb-4">
+                            <Icons.MapPin className="w-8 h-8 text-gray-400" />
+                        </div>
+                        <h3 className="text-xl font-bold text-gray-800">Google Maps Not Configured</h3>
+                        <p className="text-gray-500 max-w-md mt-2 mb-6">
+                            To view live employee locations, you need to add a Google Maps API Key in Site Settings.
+                        </p>
+                        <div className="flex gap-3">
+                            <button className="px-6 py-2 bg-brand-600 text-white rounded-lg font-bold hover:bg-brand-700 transition-colors">
+                                Go to Settings
+                            </button>
+                        </div>
+                    </div>
+                )}
+                
+                {/* Floating Info Card */}
+                {selectedEmp && (
+                    <div className="absolute top-4 right-4 bg-white/90 backdrop-blur p-4 rounded-xl shadow-lg border border-white/50 max-w-xs">
+                        <h4 className="font-bold text-gray-900">{selectedEmp.name}</h4>
+                        <p className="text-sm text-gray-600 mt-1">{selectedEmp.location || 'Fetching...'}</p>
+                        <div className="mt-3 flex gap-2">
+                             <button className="flex-1 bg-brand-600 text-white text-xs font-bold py-2 rounded-lg">View History</button>
+                             <button className="flex-1 bg-white border border-gray-200 text-gray-700 text-xs font-bold py-2 rounded-lg">Call</button>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
 };
 
 // --- Main Dashboard Component ---
@@ -909,6 +1207,7 @@ interface DashboardProps {
 export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [employeeSearchQuery, setEmployeeSearchQuery] = useState(''); // New State for Search
   const [showAddEmployeeModal, setShowAddEmployeeModal] = useState(false);
   const [activeModalTab, setActiveModalTab] = useState('personal'); // 'personal', 'attendance', 'salary', 'leaves'
   
@@ -970,40 +1269,40 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
   useEffect(() => {
     // 1. Load Employees
     if (isConfigured) {
-      const q = query(collection(db, 'employees'), orderBy('name'));
-      const unsubscribe = onSnapshot(q, (snapshot) => {
+      const q = db.collection('employees').orderBy('name');
+      const unsubscribe = q.onSnapshot((snapshot) => {
         const empList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Employee));
         setEmployees(empList);
       }, (error) => console.error("Employee sync error:", error));
       
       // 2. Load Transactions
-      const tQ = query(collection(db, 'transactions'), orderBy('date', 'desc'));
-      const unsubscribeTrans = onSnapshot(tQ, (snapshot) => {
+      const tQ = db.collection('transactions').orderBy('date', 'desc');
+      const unsubscribeTrans = tQ.onSnapshot((snapshot) => {
          const transList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Transaction));
          setTransactions(transList);
       }, (error) => console.error("Transaction sync error:", error));
 
       // 3. Load Departments for Dropdown
-      const deptQ = query(collection(db, 'settings_departments'), orderBy('name'));
-      const unsubDept = onSnapshot(deptQ, (snap) => {
+      const deptQ = db.collection('settings_departments').orderBy('name');
+      const unsubDept = deptQ.onSnapshot((snap) => {
          setDepartments(snap.docs.map(d => ({ id: d.id, name: d.data().name })));
       });
 
       // 4. Load Roles for Dropdown
-      const roleQ = query(collection(db, 'settings_roles'), orderBy('name'));
-      const unsubRole = onSnapshot(roleQ, (snap) => {
+      const roleQ = db.collection('settings_roles').orderBy('name');
+      const unsubRole = roleQ.onSnapshot((snap) => {
          setRoles(snap.docs.map(d => ({ id: d.id, name: d.data().name })));
       });
 
       // 5. Load Branches for Dropdown
-      const branchQ = query(collection(db, 'settings_branches'), orderBy('name'));
-      const unsubBranch = onSnapshot(branchQ, (snap) => {
+      const branchQ = db.collection('settings_branches').orderBy('name');
+      const unsubBranch = branchQ.onSnapshot((snap) => {
          setBranches(snap.docs.map(d => ({ id: d.id, name: d.data().name })));
       });
       
       // 6. Load Shifts for Dropdown
-      const shiftQ = query(collection(db, 'settings_shifts'), orderBy('name'));
-      const unsubShift = onSnapshot(shiftQ, (snap) => {
+      const shiftQ = db.collection('settings_shifts').orderBy('name');
+      const unsubShift = shiftQ.onSnapshot((snap) => {
          setShifts(snap.docs.map(d => ({ id: d.id, name: d.data().name })));
       });
 
@@ -1051,6 +1350,17 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     }
   }, []);
 
+  // Filter Employees based on Search Query
+  const filteredEmployees = useMemo(() => {
+     if (!employeeSearchQuery.trim()) return employees;
+     const query = employeeSearchQuery.toLowerCase();
+     return employees.filter(emp => 
+        emp.name.toLowerCase().includes(query) || 
+        emp.role.toLowerCase().includes(query) || 
+        emp.department.toLowerCase().includes(query)
+     );
+  }, [employees, employeeSearchQuery]);
+
   const handleAddEmployee = async () => {
     if (!newEmployee.name) return;
 
@@ -1064,7 +1374,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     };
 
     if (isConfigured) {
-      await addDoc(collection(db, 'employees'), empData);
+      await db.collection('employees').add(empData);
     } else {
       const updatedEmps = [...employees, { ...empData, id: Date.now().toString() } as Employee];
       setEmployees(updatedEmps);
@@ -1093,7 +1403,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     };
 
     if (isConfigured) {
-       await addDoc(collection(db, 'transactions'), transData);
+       await db.collection('transactions').add(transData);
     } else {
        const updatedTrans = [{ ...transData, id: `TXN-${Date.now()}` } as Transaction, ...transactions];
        setTransactions(updatedTrans);
@@ -1216,14 +1526,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
 
       {/* Employee List */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-        <div className="p-6 border-b border-slate-100 flex justify-between items-center">
-          <h3 className="font-bold text-lg text-slate-800">Employee Directory</h3>
-          <button 
-            onClick={() => setShowAddEmployeeModal(true)} 
-            className="flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg hover:bg-brand-700 transition-colors text-sm font-medium"
-          >
-            <Icons.Plus className="w-4 h-4" /> Add Employee
-          </button>
+        <div className="p-4 border-b border-slate-100 flex flex-col md:flex-row justify-between items-center gap-4">
+          <h3 className="font-bold text-lg text-slate-800 whitespace-nowrap">Employee Directory</h3>
+          
+          <div className="flex items-center gap-3 w-full md:w-auto">
+             <div className="relative w-full md:w-64">
+                <Icons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input 
+                   type="text" 
+                   placeholder="Search by name, role..." 
+                   className="pl-9 pr-4 py-2 w-full border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-slate-50"
+                   value={employeeSearchQuery}
+                   onChange={(e) => setEmployeeSearchQuery(e.target.value)}
+                />
+             </div>
+             <button 
+               onClick={() => setShowAddEmployeeModal(true)} 
+               className="flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg hover:bg-brand-700 transition-colors text-sm font-medium whitespace-nowrap"
+             >
+               <Icons.Plus className="w-4 h-4" /> Add Employee
+             </button>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left">
@@ -1236,7 +1559,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {employees.map((emp) => (
+              {filteredEmployees.map((emp) => (
                 <tr key={emp.id} className="hover:bg-slate-50 transition-colors">
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
@@ -1268,6 +1591,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                   </td>
                 </tr>
               ))}
+              {filteredEmployees.length === 0 && (
+                 <tr>
+                    <td colSpan={4} className="px-6 py-8 text-center text-gray-400">
+                       No employees found matching "{employeeSearchQuery}"
+                    </td>
+                 </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1457,6 +1787,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 activeTab === 'finance' ? 'Finance & Expenses' :
                 activeTab === 'settings' ? 'System Configuration' : 
                 activeTab === 'employee_settings' ? 'Employee Configuration' :
+                activeTab === 'field' ? 'Field Tracking' :
                 activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}
             </h1>
             <p className="text-slate-500 text-sm mt-1">Welcome back, Admin</p>
@@ -1479,9 +1810,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
            {activeTab === 'finance' && renderFinance()}
            {activeTab === 'settings' && <SiteSettingsSection />}
            {activeTab === 'employee_settings' && <EmployeeSettingsSection />}
+           {activeTab === 'field' && <FieldTrackingSection employees={employees} />}
            
            {/* Placeholder for other tabs */}
-           {!['dashboard', 'employees', 'finance', 'settings', 'employee_settings'].includes(activeTab) && (
+           {!['dashboard', 'employees', 'finance', 'settings', 'employee_settings', 'field'].includes(activeTab) && (
               <div className="bg-white rounded-2xl p-12 text-center border border-dashed border-gray-300">
                  <Icons.Construction className="w-16 h-16 text-gray-300 mx-auto mb-4" />
                  <h3 className="text-xl font-bold text-gray-400">Under Construction</h3>
