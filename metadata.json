@@ -1,0 +1,7 @@
+{
+  "name": "Copy of JK BUDDY",
+  "description": "A comprehensive employee management, attendance, and payroll solution designed for Indian businesses, inspired by SalaryBox.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
